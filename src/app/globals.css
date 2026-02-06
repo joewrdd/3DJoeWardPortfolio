@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand-dark-purple: #2a062f;
+  --brand-deep-rose: #7a1044;
+  --brand-hot-pink: #e01e5a;
+  --brand-coral: #ff6f61;
+  --brand-peach: #ffd1a9;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0a;
+  color: white;
+}
+
+
+canvas {
+  touch-action: none;
+}
