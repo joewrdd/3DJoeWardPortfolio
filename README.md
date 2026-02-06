@@ -261,8 +261,8 @@ This project is for personal portfolio use. Feel free to use the architecture an
 
 **Joe Ward** — Full Stack Developer & Mobile Engineer
 
-- Email: [joewrrd@gmail.com](mailto:joewrrd@gmail.com)
-- GitHub: [github.com/joewrrd](https://github.com/joewrrd)
+- Email: [joewrdd@gmail.com](mailto:joewrdd@gmail.com)
+- GitHub: [github.com/joewrdd](https://github.com/joewrdd)
 
 <br />
 
