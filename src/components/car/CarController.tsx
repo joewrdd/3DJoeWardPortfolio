@@ -14,11 +14,15 @@ import CarModel from './CarModel';
 
 // Pre-allocate all reusable objects (zero GC pressure)
 const _forward = new THREE.Vector3();
+const _right = new THREE.Vector3();
 const _impulse = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _velocity = new THREE.Vector3();
+const _lateralVel = new THREE.Vector3();
+const _forwardVel = new THREE.Vector3();
 
 let _frameCount = 0;
+let _currentSteer = 0; // smoothed steering value (-1 to 1)
 
 export default function CarController() {
   const rigidBodyRef = useRef<RapierRigidBody>(null);
@@ -27,7 +31,7 @@ export default function CarController() {
   useKeyboardControls();
   useIsMobile();
 
-  const controlsInput = useGameStore((s) => s.controlsInput);
+  // Only subscribe to setters (stable references, no re-renders on input changes)
   const setSpeed = useGameStore((s) => s.setSpeed);
   const setIsStarted = useGameStore((s) => s.setIsStarted);
   const setCarPosition = useGameStore((s) => s.setCarPosition);
@@ -37,14 +41,18 @@ export default function CarController() {
     const rb = rigidBodyRef.current;
     if (!rb) return;
 
-    const { forward, backward, left, right, brake } = controlsInput;
+    // Clamp delta to avoid physics explosions on tab-switch or lag spikes
+    const dt = Math.min(delta, 0.05);
 
-    // Mark as started if any input (only when not already started)
+    // Read controls directly from Zustand snapshot (no subscription = no re-render)
+    const { forward, backward, left, right, brake } = useGameStore.getState().controlsInput;
+
+    // Mark as started if any input
     if ((forward || backward || left || right) && !useGameStore.getState().isStarted) {
       setIsStarted(true);
     }
 
-    // Get physics state
+    // --- Read physics state ---
     const pos = rb.translation();
     const rotation = rb.rotation();
 
@@ -57,19 +65,24 @@ export default function CarController() {
     carState.rotation[2] = rotation.z;
     carState.rotation[3] = rotation.w;
 
-    // Forward direction from rotation (reuse pre-allocated quaternion)
+    // Car orientation vectors
     _quat.set(rotation.x, rotation.y, rotation.z, rotation.w);
     _forward.set(0, 0, -1).applyQuaternion(_quat);
+    _right.set(1, 0, 0).applyQuaternion(_quat);
 
-    // Speed + direction detection
+    // Current velocity
     const linvel = rb.linvel();
     _velocity.set(linvel.x, linvel.y, linvel.z);
-    const currentSpeed = _velocity.length();
-    const forwardDot = _velocity.dot(_forward);
-    const isMovingBackward = forwardDot < -0.3;
+
+    // Decompose velocity into forward and lateral components
+    const forwardSpeed = _velocity.dot(_forward);
+    const lateralSpeed = _velocity.dot(_right);
+    const currentSpeed = Math.abs(forwardSpeed);
+    const isMovingBackward = forwardSpeed < -0.3;
+
     carState.speed = currentSpeed * 3.6;
 
-    // Throttle Zustand updates (~15fps instead of 60fps) for HUD/ActiveZones
+    // Throttle Zustand updates (~15fps) for HUD/ActiveZones
     _frameCount++;
     if (_frameCount % 4 === 0) {
       setCarPosition([pos.x, pos.y, pos.z]);
@@ -77,17 +90,34 @@ export default function CarController() {
       setSpeed(currentSpeed * 3.6);
     }
 
-    // Throttle / reverse (use actual delta for frame-rate independence)
+    // =============================================
+    // LATERAL FRICTION — the key to natural driving
+    // =============================================
+    // Kill sideways velocity so the car grips the road instead of sliding.
+    // gripFactor=1 means perfect grip (go-kart), 0 means ice.
+    const gripFactor = PHYSICS.lateralGrip;
+    _lateralVel.copy(_right).multiplyScalar(lateralSpeed);
+    _forwardVel.copy(_forward).multiplyScalar(forwardSpeed);
+
+    // Rebuild velocity: keep all forward, remove most lateral
+    _velocity.copy(_forwardVel).addScaledVector(_lateralVel, 1 - gripFactor);
+    _velocity.y = linvel.y; // preserve gravity
+    rb.setLinvel({ x: _velocity.x, y: _velocity.y, z: _velocity.z }, true);
+
+    // --- Throttle / Reverse ---
     if (forward && currentSpeed < PHYSICS.maxSpeed) {
-      _impulse.copy(_forward).multiplyScalar(PHYSICS.throttleForce * delta);
+      _impulse.copy(_forward).multiplyScalar(PHYSICS.throttleForce * dt);
       rb.applyImpulse({ x: _impulse.x, y: _impulse.y, z: _impulse.z }, true);
     }
     if (backward) {
-      _impulse.copy(_forward).multiplyScalar(-PHYSICS.reverseForce * delta);
-      rb.applyImpulse({ x: _impulse.x, y: _impulse.y, z: _impulse.z }, true);
+      const reverseMax = PHYSICS.maxSpeed * 0.4;
+      if (currentSpeed < reverseMax || !isMovingBackward) {
+        _impulse.copy(_forward).multiplyScalar(-PHYSICS.reverseForce * dt);
+        rb.applyImpulse({ x: _impulse.x, y: _impulse.y, z: _impulse.z }, true);
+      }
     }
 
-    // Brake
+    // --- Brake ---
     if (brake) {
       const vel = rb.linvel();
       rb.setLinvel(
@@ -100,19 +130,27 @@ export default function CarController() {
       );
     }
 
-    // Steering (only when moving)
+    // --- Steering (direct angular velocity, smoothly interpolated) ---
+    const steerInput = (left ? 1 : 0) - (right ? 1 : 0);
+
+    if (steerInput !== 0) {
+      const target = steerInput * (isMovingBackward ? -1 : 1);
+      _currentSteer += (target - _currentSteer) * Math.min(1, PHYSICS.steerSpeed * dt);
+    } else {
+      _currentSteer *= Math.max(0, 1 - PHYSICS.steerReturnSpeed * dt);
+      if (Math.abs(_currentSteer) < 0.01) _currentSteer = 0;
+    }
+
+    // Scale steering by speed — needs some speed to turn, reduced at very high speed
     if (currentSpeed > 0.3) {
-      const steerDir = (left ? 1 : 0) - (right ? 1 : 0);
-      if (steerDir !== 0) {
-        // Invert steering when reversing so it feels natural
-        const effectiveSteerDir = isMovingBackward ? -steerDir : steerDir;
-        // Scale steering by speed — responsive at low speed, full at cruising
-        const steerScale = Math.max(0.3, Math.min(currentSpeed / 5, 1));
-        rb.applyTorqueImpulse(
-          { x: 0, y: effectiveSteerDir * PHYSICS.steerTorque * steerScale * delta, z: 0 },
-          true
-        );
-      }
+      const speedFactor = Math.min(currentSpeed / 3, 1) * Math.max(0.5, 1 - currentSpeed / (PHYSICS.maxSpeed * 1.5));
+      rb.setAngvel(
+        { x: 0, y: _currentSteer * PHYSICS.maxSteerAngle * speedFactor, z: 0 },
+        true
+      );
+    } else {
+      // Kill angular velocity when nearly stopped
+      rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
     }
   });
 

@@ -17,7 +17,10 @@ export default function FollowCamera() {
   const { camera } = useThree();
   const currentLookAt = useRef(new THREE.Vector3(0, 1, 0));
 
-  useFrame(() => {
+  useFrame((_, delta) => {
+    // Clamp delta to avoid camera jumps on tab-switch
+    const dt = Math.min(delta, 0.05);
+
     // Read directly from shared mutable state (no Zustand subscription)
     _carPos.set(carState.position[0], carState.position[1], carState.position[2]);
     _quat.set(
@@ -42,9 +45,13 @@ export default function FollowCamera() {
     _idealLookAt.addScaledVector(_direction, Math.abs(CAMERA.lookAtOffset[2]));
     _idealLookAt.y += CAMERA.lookAtOffset[1];
 
-    // Smooth follow
-    camera.position.lerp(_idealPosition, CAMERA.lerpSpeed);
-    currentLookAt.current.lerp(_idealLookAt, CAMERA.lerpSpeed);
+    // Frame-rate independent smooth follow using exponential decay
+    // factor = 1 - e^(-speed * dt), which gives consistent feel at any fps
+    const posAlpha = 1 - Math.exp(-CAMERA.positionLerp * 60 * dt);
+    const lookAlpha = 1 - Math.exp(-CAMERA.lookAtLerp * 60 * dt);
+
+    camera.position.lerp(_idealPosition, posAlpha);
+    currentLookAt.current.lerp(_idealLookAt, lookAlpha);
     camera.lookAt(currentLookAt.current);
   });
 
